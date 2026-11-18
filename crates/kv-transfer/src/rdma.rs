@@ -100,7 +100,27 @@ fn raise_memlock() {
 }
 
 #[cfg(all(target_os = "linux", feature = "rdma"))]
+fn tcp_mode() -> bool {
+    matches!(
+        std::env::var("DSUF_KV_TCP").unwrap_or_default().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(all(target_os = "linux", feature = "rdma"))]
 fn hardware_env() -> Result<(String, String)> {
+    if tcp_mode() {
+        // Single-replica escape hatch: KV transfer runs over UCX TCP (software RMA)
+        // instead of RDMA. Same-replica KV reuse never crosses the network.
+        let tls = std::env::var("UCX_TLS").ok().filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "tcp,self,sm".into());
+        let devices = std::env::var("UCX_NET_DEVICES").ok().filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "all".into());
+        deepseek_ultrafast_logging::diagnostic!(
+            "KV TCP mode: DSUF_KV_TCP set, RDMA port check skipped; UCX_TLS={tls} UCX_NET_DEVICES={devices}"
+        );
+        return Ok((tls, devices));
+    }
     let tls = std::env::var("UCX_TLS").unwrap_or_else(|_| DEFAULT_TLS.into());
     let devices = std::env::var("UCX_NET_DEVICES").ok().filter(|d| !d.is_empty())
         .unwrap_or_else(|| active_ports().join(","));
@@ -361,7 +381,7 @@ impl DataPlane {
                 .alloc_pinned_writer(capacity)
                 .await
                 .map_err(required)?;
-            let mut dest = StrictWriter(writer);
+            let mut dest = StrictWriter(writer, tcp_mode());
             let lease = self
                 .velo
                 .get_into(handle, &mut dest)
@@ -381,7 +401,7 @@ impl DataPlane {
 }
 
 #[cfg(all(target_os = "linux", feature = "rdma"))]
-struct StrictWriter(velo::PinnedWriter);
+struct StrictWriter(velo::PinnedWriter, bool);
 #[cfg(all(target_os = "linux", feature = "rdma"))]
 impl velo::RendezvousWrite for StrictWriter {
     fn capacity(&self) -> usize {
@@ -390,7 +410,11 @@ impl velo::RendezvousWrite for StrictWriter {
     fn rdma_destination(&mut self) -> Option<velo::RdmaDestination<'_>> {
         self.0.rdma_destination()
     }
-    fn write_chunk(&mut self, _offset: usize, _data: &[u8]) -> Result<()> {
+    fn write_chunk(&mut self, offset: usize, data: &[u8]) -> Result<()> {
+        if self.1 {
+            // DSUF_KV_TCP: accept Velo's chunked copy path over TCP.
+            return velo::RendezvousWrite::write_chunk(&mut self.0, offset, data);
+        }
         Err(required(
             "Velo attempted a chunked/copy fallback instead of a direct RDMA GET",
         ))
