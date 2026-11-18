@@ -10,9 +10,34 @@ model_metadata:
     max_tokens: 512
   tags:
     - openai-compatible
+# Baseten builds the engine from source (DSUF_SM=sm_100a, B200), so no registry is needed.
+# deploy/truss/Dockerfile is the alternative when you can push a prebuilt image.
 base_image:
-  # Built from deploy/truss/Dockerfile with DSUF_SM=sm_100a (B200).
-  image: REPLACE_WITH_PUSHED_IMAGE
+  image: pytorch/pytorch:2.14.1-cuda13.2-cudnn9-devel
+system_packages:
+  - build-essential
+  - pkg-config
+  - cmake
+  - clang
+  - libclang-dev
+  - libibverbs-dev
+  - librdmacm-dev
+  - ibverbs-providers
+  - rdma-core
+  - libopencv-dev
+  - redis-server
+  - git
+  - curl
+  - ca-certificates
+build_commands:
+  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo sh -s -- -y --default-toolchain 1.98.1 --profile minimal --no-modify-path
+  - chmod -R a+rX /usr/local/rustup /usr/local/cargo && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo && ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+  # cuDNN lives only in the PyTorch pip wheel here; put it on the loader path or cudarc cannot dlopen it.
+  - 'set -e; lib=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -name ''libcudnn.so.9*'' -print 2>/dev/null | head -1); test -n "$lib"; echo "cudnn: $lib"; dirname "$lib" > /etc/ld.so.conf.d/zz-cudnn.conf; ldconfig; ldconfig -p | grep -E ''libcudnn\.so\.9 '''
+  - git clone https://github.com/basetenlabs/deepseek-ultrafast /opt/dsuf && git -C /opt/dsuf checkout 89a190ef00164463388b2bae6b38d6c98314c822
+  # panic=abort: a GPU-thread panic exits the container instead of hanging until the health window ends.
+  - cd /opt/dsuf && CARGO_PROFILE_RELEASE_PANIC=abort RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo DSUF_SM=sm_100a NVCC=/usr/local/cuda/bin/nvcc LIBCLANG_PATH=/usr/lib/llvm-18/lib cargo build --locked --release -p deepseek-ultrafast-server -p deepseek-ultrafast-kv-transfer --bins
+  - cp /opt/dsuf/target/release/serve /opt/dsuf/target/release/kv-rdma-check /usr/local/bin/ && rm -rf /opt/dsuf/target /usr/local/cargo/registry
 weights:
   - source: "hf://deepseek-ai/DeepSeek-V4.1-Flash@314113f8a7dadb388215396ba5fbee2c610a04d6"
     mount_location: "/models"
