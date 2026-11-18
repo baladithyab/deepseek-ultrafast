@@ -34,7 +34,7 @@ build_commands:
   - chmod -R a+rX /usr/local/rustup /usr/local/cargo && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo && ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup
   # cuDNN lives only in the PyTorch pip wheel here; put it on the loader path or cudarc cannot dlopen it.
   - 'set -e; lib=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -name ''libcudnn.so.9*'' -print 2>/dev/null | head -1); test -n "$lib"; echo "cudnn: $lib"; dirname "$lib" > /etc/ld.so.conf.d/zz-cudnn.conf; ldconfig; ldconfig -p | grep -E ''libcudnn\.so\.9 '''
-  - git clone https://github.com/basetenlabs/deepseek-ultrafast /opt/dsuf && git -C /opt/dsuf checkout 89a190ef00164463388b2bae6b38d6c98314c822
+  - git clone --branch kv-local-only https://github.com/baladithyab/deepseek-ultrafast /opt/dsuf && git -C /opt/dsuf checkout 89a190ef00164463388b2bae6b38d6c98314c822
   # panic=abort: a GPU-thread panic exits the container instead of hanging until the health window ends.
   - cd /opt/dsuf && CARGO_PROFILE_RELEASE_PANIC=abort RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo DSUF_SM=sm_100a NVCC=/usr/local/cuda/bin/nvcc LIBCLANG_PATH=/usr/lib/llvm-18/lib cargo build --locked --release -p deepseek-ultrafast-server -p deepseek-ultrafast-kv-transfer --bins
   - cp /opt/dsuf/target/release/serve /opt/dsuf/target/release/kv-rdma-check /usr/local/bin/ && rm -rf /opt/dsuf/target /usr/local/cargo/registry
