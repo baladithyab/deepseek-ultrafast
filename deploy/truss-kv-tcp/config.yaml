@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/basetenlabs/truss/main/truss/config.schema.json
+# TEST ONLY: two serve processes in one B200:8 pod exchange KV over UCX TCP (DSUF_KV_TCP).
+# data/kv_proxy.py fronts them; header X-DSUF-Server: 0|1 picks the server.
+model_name: deepseek-v4.1-flash-ultrafast-kv-tcp
+model_metadata:
+  repo_id: deepseek-ai/DeepSeek-V4.1-Flash
+  example_model_input:
+    model: deepseek-v4.1-flash
+    messages:
+      - role: user
+        content: "What is 84 * 3 / 2?"
+    max_tokens: 512
+  tags:
+    - openai-compatible
+# Baseten builds the engine from source (DSUF_SM=sm_100a, B200), so no registry is needed.
+# deploy/truss/Dockerfile is the alternative when you can push a prebuilt image.
+base_image:
+  image: pytorch/pytorch:2.14.1-cuda13.2-cudnn9-devel
+system_packages:
+  - build-essential
+  - pkg-config
+  - cmake
+  - clang
+  - libclang-dev
+  - libibverbs-dev
+  - librdmacm-dev
+  - ibverbs-providers
+  - rdma-core
+  - libopencv-dev
+  - redis-server
+  - git
+  - curl
+  - ca-certificates
+build_commands:
+  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo sh -s -- -y --default-toolchain 1.98.1 --profile minimal --no-modify-path
+  - chmod -R a+rX /usr/local/rustup /usr/local/cargo && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo && ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+  # cuDNN lives only in the PyTorch pip wheel here; put it on the loader path or cudarc cannot dlopen it.
+  - 'set -e; lib=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -name ''libcudnn.so.9*'' -print 2>/dev/null | head -1); test -n "$lib"; echo "cudnn: $lib"; dirname "$lib" > /etc/ld.so.conf.d/zz-cudnn.conf; ldconfig; ldconfig -p | grep -E ''libcudnn\.so\.9 '''
+  - git clone --branch bis-kv-experiments https://github.com/baladithyab/deepseek-ultrafast /opt/dsuf && git -C /opt/dsuf checkout ac093a0
+  # panic=abort: a GPU-thread panic exits the container instead of hanging until the health window ends.
+  - cd /opt/dsuf && CARGO_PROFILE_RELEASE_PANIC=abort RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo DSUF_SM=sm_100a NVCC=/usr/local/cuda/bin/nvcc LIBCLANG_PATH=/usr/lib/llvm-18/lib cargo build --locked --release -p deepseek-ultrafast-server -p deepseek-ultrafast-kv-transfer --bins
+  - cp /opt/dsuf/target/release/serve /opt/dsuf/target/release/kv-rdma-check /usr/local/bin/ && rm -rf /opt/dsuf/target /usr/local/cargo/registry
+weights:
+  - source: "hf://deepseek-ai/DeepSeek-V4.1-Flash@314113f8a7dadb388215396ba5fbee2c610a04d6"
+    mount_location: "/models"
+resources:
+  instance_type: B200:8
+environment_variables:
+  # One Redis shared by both servers; each server gets its own DSUF_KV_PORT in start_command.
+  DSUF_KV_TCP: "1"
+  DSUF_KV_HOST: "127.0.0.1"
+  DSUF_REDIS_URL: redis://127.0.0.1:6379
+docker_server:
+  # wait -n: if any process exits, the container exits and restarts.
+  start_command: >-
+    bash -c "redis-server --bind 127.0.0.1 --save '' --appendonly no &
+    DSUF_KV_PORT=19500 serve --host 127.0.0.1 --ckpt /models --gpus 0,1,2,3 --port 8001 --max-seq 131072 &
+    DSUF_KV_PORT=19501 serve --host 127.0.0.1 --ckpt /models --gpus 4,5,6,7 --port 8002 --max-seq 131072 &
+    python3 /app/data/kv_proxy.py 8000 8001 8002 &
+    wait -n; exit 1"
+  readiness_endpoint: /readyz
+  liveness_endpoint: /health
+  predict_endpoint: /v1/chat/completions
+  server_port: 8000
+runtime:
+  predict_concurrency: 64
+  health_checks:
+    startup_threshold_seconds: 1800
