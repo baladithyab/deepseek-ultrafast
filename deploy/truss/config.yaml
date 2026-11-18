@@ -49,9 +49,10 @@ environment_variables:
   DSUF_KV_HOST: "127.0.0.1"
   DSUF_REDIS_URL: redis://127.0.0.1:6379
 docker_server:
+  # --max-seq 131072: the 1M default runs out of GPU memory at load on B200:4. Larger values are untested.
   start_command: >-
     sh -c "redis-server --bind 127.0.0.1 --save '' --appendonly no &
-    exec serve --host 0.0.0.0 --ckpt /models --gpus 0,1,2,3 --port 8000"
+    exec serve --host 0.0.0.0 --ckpt /models --gpus 0,1,2,3 --port 8000 --max-seq 131072"
   readiness_endpoint: /readyz
   liveness_endpoint: /health
   predict_endpoint: /v1/chat/completions
