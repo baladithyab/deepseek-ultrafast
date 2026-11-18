@@ -156,6 +156,15 @@ pub(crate) struct DataPlane {
     pub velo: Arc<Velo>,
     #[cfg(all(target_os = "linux", feature = "rdma"))]
     cleanup_timeout: Duration,
+    #[cfg(all(target_os = "linux", feature = "rdma"))]
+    local_only: bool,
+}
+
+// shortcut: a local-only replica keeps its own KV cache but cannot donate or fetch snapshots;
+// replicas that share a Redis still need RDMA.
+#[cfg(any(test, all(target_os = "linux", feature = "rdma")))]
+fn local_only(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 impl DataPlane {
@@ -169,6 +178,15 @@ impl DataPlane {
         }
         #[cfg(all(target_os = "linux", feature = "rdma"))]
         {
+            if local_only(&std::env::var("DSUF_KV_LOCAL_ONLY").unwrap_or_default()) {
+                use velo::transports::tcp::TcpTransportBuilder;
+                let tcp = Arc::new(TcpTransportBuilder::new().bind_addr(bind).socket_buffers(None).build()?);
+                let velo = Velo::builder().add_transport(tcp).stream_bind_addr(bind.ip()).build().await?;
+                deepseek_ultrafast_logging::diagnostic!(
+                    "KV RDMA DISABLED by DSUF_KV_LOCAL_ONLY: this replica keeps a local KV cache and shares none with peers"
+                );
+                return Ok(Self { velo, cleanup_timeout: timeout, local_only: true });
+            }
             raise_memlock();
             let (tls, devices) = hardware_env().map_err(required)?;
             let plane = Self::build(bind, budget, timeout, &tls, &devices)
@@ -236,6 +254,7 @@ impl DataPlane {
         Ok(Self {
             velo,
             cleanup_timeout: timeout.saturating_mul(2).max(Duration::from_secs(30)),
+            local_only: false,
         })
     }
 
@@ -287,6 +306,13 @@ impl DataPlane {
         }
         #[cfg(all(target_os = "linux", feature = "rdma"))]
         {
+            if self.local_only {
+                return Ok(Arc::new(Staged {
+                    handle: self.velo.register_data(Bytes::copy_from_slice(data)),
+                    store: self.velo.rendezvous_manager().data_store().clone(),
+                    registration: None,
+                }));
+            }
             let mut owned = Vec::new();
             owned.try_reserve_exact(data.len()).map_err(required)?;
             owned.extend_from_slice(data);
@@ -384,6 +410,11 @@ pub(crate) use tests::heap_stage;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_only_is_opt_in() {
+        assert!(local_only("1") && local_only("TRUE"));
+        assert!(!local_only("") && !local_only("0") && !local_only("false"));
+    }
     pub(crate) fn heap_stage(data: Bytes) -> Arc<Staged> {
         let store = Arc::new(velo::rendezvous::store::DataStore::new());
         let id = store.register(data, None);

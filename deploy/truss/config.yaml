@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/basetenlabs/truss/main/truss/config.schema.json
+model_name: deepseek-v4.1-flash-ultrafast
+model_metadata:
+  repo_id: deepseek-ai/DeepSeek-V4.1-Flash
+  example_model_input:
+    model: deepseek-v4.1-flash
+    messages:
+      - role: user
+        content: "What is 84 * 3 / 2?"
+    max_tokens: 512
+  tags:
+    - openai-compatible
+base_image:
+  # Built from deploy/truss/Dockerfile with DSUF_SM=sm_100a (B200).
+  image: REPLACE_WITH_PUSHED_IMAGE
+weights:
+  - source: "hf://deepseek-ai/DeepSeek-V4.1-Flash@314113f8a7dadb388215396ba5fbee2c610a04d6"
+    mount_location: "/models"
+resources:
+  instance_type: B200:4
+environment_variables:
+  # No RDMA on this hardware: each replica keeps its own KV cache and its own Redis.
+  DSUF_KV_LOCAL_ONLY: "1"
+  DSUF_KV_HOST: "127.0.0.1"
+  DSUF_REDIS_URL: redis://127.0.0.1:6379
+docker_server:
+  start_command: >-
+    sh -c "redis-server --bind 127.0.0.1 --save '' --appendonly no &
+    exec serve --host 0.0.0.0 --ckpt /models --gpus 0,1,2,3 --port 8000"
+  readiness_endpoint: /readyz
+  liveness_endpoint: /health
+  predict_endpoint: /v1/chat/completions
+  server_port: 8000
+runtime:
+  predict_concurrency: 64
+  health_checks:
+    startup_threshold_seconds: 1800

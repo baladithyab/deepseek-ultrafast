@@ -36,4 +36,5 @@ For TP8 on 8-GPU B300 nodes, set the container's `--gpus 0,1,2,3,4,5,6,7` and `n
 
 - `DSUF_REDIS_URL` (default `redis://127.0.0.1:6379`): the Redis shared by replicas
 - `DSUF_KV_HOST`, `DSUF_KV_PORT` (default port `19500`): the address peers reach for KV transfer
+- `DSUF_KV_LOCAL_ONLY=1`: run without RDMA. The replica keeps its own KV cache and shares none; give each such replica its own Redis
 - `serve` flags: `--gpus`, `--port`, `--max-seq`, `--chunk`, `--model-name`, `--ckpt`
